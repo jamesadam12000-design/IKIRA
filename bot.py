@@ -19,7 +19,7 @@ YOUR_USER_ID = os.getenv('YOUR_USER_ID')
 
 # Debug startup
 print("=" * 60)
-print("🤖 DISCORD DM AUTO-REPLY BOT")
+print("🤖 DISCORD DM AUTO-REPLY + RELAY BOT")
 print("=" * 60)
 
 # Check token
@@ -87,11 +87,21 @@ def get_reply(status):
     return "Hey! Thanks for DMing me! I'll get back to you soon! 📨"
 
 
-# === SINGLE on_ready HANDLER ===
-# NOTE: discord.py only keeps the LAST @bot.event handler registered for a
-# given event name. The original file defined on_ready() twice, so the
-# first definition (server list / membership check / presence) was silently
-# overwritten and never ran. Everything is now merged into one handler.
+async def relay_to_owner(content: str):
+    """Send a message to the bot owner's DMs (from the bot, not as the user)."""
+    try:
+        owner = await bot.fetch_user(YOUR_USER_ID)
+        # Discord DMs cap at 2000 chars; trim defensively
+        if len(content) > 1900:
+            content = content[:1900] + "\n...(truncated)"
+        await owner.send(content)
+        print("   📤 Relayed to owner")
+    except discord.Forbidden:
+        print("   ❌ Could not relay to owner (owner has DMs from the bot disabled/blocked)")
+    except Exception as e:
+        print(f"   ❌ Error relaying to owner: {e}")
+
+
 @bot.event
 async def on_ready():
     """Called when bot connects to Discord"""
@@ -102,7 +112,6 @@ async def on_ready():
     print(f"👥 Connected to {len(bot.guilds)} server(s)")
     print("-" * 60)
 
-    # List all servers and check if you're in them
     for guild in bot.guilds:
         print(f"📁 Server: {guild.name} (ID: {guild.id})")
         try:
@@ -110,29 +119,24 @@ async def on_ready():
             if member:
                 print(f"   ✅ YOU are in this server! Status: {member.status}")
             else:
-                print(f"   ⚠️ You are NOT in this server (bot can't DM you here)")
+                print(f"   ⚠️ You are NOT in this server (can't check status or catch mentions here)")
         except Exception as e:
             print(f"   ⚠️ Could not check membership: {e}")
 
     print("=" * 60)
-    print("📨 Bot is now MONITORING for DMs...")
-    print("💡 Test: Have a friend DM your Discord account!")
-    print("⚠️  Note: Bot will NOT reply to your own DMs")
+    print("📨 Bot is now MONITORING for DMs and @mentions...")
     print("=" * 60)
 
-    # Set bot status
     try:
         await bot.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name="for DMs"
+                name="for DMs & mentions"
             )
         )
     except Exception as e:
         print(f"⚠️ Could not set presence: {e}")
 
-    # Start keep-alive loop (only once, guard against on_ready firing
-    # multiple times on reconnects)
     if not getattr(bot, "_keep_alive_started", False):
         bot._keep_alive_started = True
         bot.loop.create_task(keep_alive())
@@ -142,7 +146,7 @@ async def on_ready():
 async def on_message(message):
     """Handle all incoming messages"""
 
-    # Ignore messages from bots
+    # Ignore messages from bots (including itself)
     if message.author.bot:
         return
 
@@ -158,70 +162,82 @@ async def on_message(message):
             await message.reply(f"❌ Error: {e}")
         return
 
-    # === HANDLE DMs ONLY ===
-    if not isinstance(message.channel, discord.DMChannel):
-        return
-
-    # Log the DM
-    print("-" * 60)
-    print(f"📨 DM RECEIVED")
-    print(f"   From: {message.author} (ID: {message.author.id})")
-    print(f"   Content: {message.content[:100]}")
-    print(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
-
-    # Ignore if DM is from yourself (prevents infinite loops)
-    if message.author.id == YOUR_USER_ID:
-        print("   ⏭️  Ignoring - DM from yourself")
+    # === CASE 1: DM sent directly to the bot ===
+    if isinstance(message.channel, discord.DMChannel):
         print("-" * 60)
-        return
+        print(f"📨 DM RECEIVED")
+        print(f"   From: {message.author} (ID: {message.author.id})")
+        print(f"   Content: {message.content[:100]}")
+        print(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
 
-    # Check cooldown
-    if message.author.id in cooldowns:
-        if datetime.now() < cooldowns[message.author.id]:
-            remaining = int((cooldowns[message.author.id] - datetime.now()).total_seconds())
-            print(f"   ⏳ Cooldown: {remaining}s remaining")
+        # Ignore if DM is from yourself (prevents infinite loops)
+        if message.author.id == YOUR_USER_ID:
+            print("   ⏭️  Ignoring - DM from yourself")
             print("-" * 60)
             return
 
-    try:
-        # Get your current status
-        status = 'offline'
-        for guild in bot.guilds:
-            member = guild.get_member(YOUR_USER_ID)
-            if member and member.status:
-                status = str(member.status)
-                print(f"   📌 Your status: {status} (from {guild.name})")
-                break
-        else:
-            print("   ⚠️ Could not find your member object in any guild "
-                  "(status defaulting to 'offline'). Check that the bot "
-                  "shares a server with you and that the 'members' "
-                  "privileged intent is enabled in the Developer Portal.")
+        # Always relay the DM content to the owner, regardless of cooldown
+        await relay_to_owner(
+            f"📨 **New DM from {message.author} ({message.author.id}):**\n{message.content}"
+        )
 
-        # Get reply message
-        reply = get_reply(status)
+        # Check cooldown for the auto-reply (relay above is not subject to this)
+        on_cooldown = False
+        if message.author.id in cooldowns:
+            if datetime.now() < cooldowns[message.author.id]:
+                remaining = int((cooldowns[message.author.id] - datetime.now()).total_seconds())
+                print(f"   ⏳ Auto-reply cooldown: {remaining}s remaining (relay still sent)")
+                on_cooldown = True
 
-        # Send the reply
-        await message.reply(reply)
+        if not on_cooldown:
+            try:
+                # Get your current status
+                status = 'offline'
+                for guild in bot.guilds:
+                    member = guild.get_member(YOUR_USER_ID)
+                    if member and member.status:
+                        status = str(member.status)
+                        print(f"   📌 Your status: {status} (from {guild.name})")
+                        break
+                else:
+                    print("   ⚠️ Could not find your member object in any guild "
+                          "(status defaulting to 'offline').")
 
-        # Set cooldown
-        cooldowns[message.author.id] = datetime.now() + timedelta(minutes=COOLDOWN_MINUTES)
+                reply = get_reply(status)
+                await message.reply(reply)
 
-        print(f"   ✅ Auto-reply sent to {message.author}")
-        print(f"   📝 Reply: {reply[:50]}...")
+                cooldowns[message.author.id] = datetime.now() + timedelta(minutes=COOLDOWN_MINUTES)
 
-    except discord.Forbidden:
-        print(f"   ❌ Cannot send DM to {message.author} (blocked or DMs disabled)")
-    except Exception as e:
-        print(f"   ❌ Error sending reply: {e}")
-        # Try fallback
-        try:
-            await message.reply("Hey! Thanks for your message! I'll get back to you soon! 📨")
-            print(f"   ✅ Fallback reply sent")
-        except Exception as fallback_error:
-            print(f"   ❌ Fallback reply also failed: {fallback_error}")
+                print(f"   ✅ Auto-reply sent to {message.author}")
+                print(f"   📝 Reply: {reply[:50]}...")
 
-    print("-" * 60)
+            except discord.Forbidden:
+                print(f"   ❌ Cannot send DM to {message.author} (blocked or DMs disabled)")
+            except Exception as e:
+                print(f"   ❌ Error sending reply: {e}")
+                try:
+                    await message.reply("Hey! Thanks for your message! I'll get back to you soon! 📨")
+                    print(f"   ✅ Fallback reply sent")
+                except Exception as fallback_error:
+                    print(f"   ❌ Fallback reply also failed: {fallback_error}")
+
+        print("-" * 60)
+        return
+
+    # === CASE 2: You were @mentioned in a server ===
+    if message.guild is not None and any(u.id == YOUR_USER_ID for u in message.mentions):
+        print("-" * 60)
+        print(f"🔔 MENTION DETECTED")
+        print(f"   From: {message.author} (ID: {message.author.id})")
+        print(f"   Server: {message.guild.name} | Channel: #{message.channel}")
+        print(f"   Content: {message.content[:100]}")
+
+        await relay_to_owner(
+            f"🔔 **{message.author}** mentioned you in **#{message.channel}** "
+            f"({message.guild.name}):\n{message.content}"
+        )
+        print("-" * 60)
+        return
 
 
 @bot.event
@@ -249,13 +265,11 @@ async def keep_alive():
     counter = 0
     while not bot.is_closed():
         try:
-            # Clean expired cooldowns
             now = datetime.now()
             expired = [uid for uid, expiry in cooldowns.items() if now > expiry]
             for uid in expired:
                 del cooldowns[uid]
 
-            # Log heartbeat every minute
             counter += 1
             if counter % 2 == 0:
                 print(f"💓 Bot is alive | {len(bot.guilds)} servers | {len(bot.users)} users")
