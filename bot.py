@@ -365,7 +365,13 @@ async def on_message(message):
         print(f"   Server: {message.guild.name} | Channel: #{message.channel}")
         print(f"   Content: {message.content[:100]}")
 
-        # Always relay to owner, regardless of cooldown
+        # Ignore if the mention is from yourself
+        if message.author.id == YOUR_USER_ID:
+            print("   ⏭️  Ignoring - mention from yourself")
+            print("-" * 60)
+            return
+
+        # Relay to owner only — bot does NOT reply in the channel
         relayed = await relay_to_owner(
             f"🔔 **{message.author}** mentioned you in **#{message.channel}** "
             f"({message.guild.name}):\n{message.content}\n"
@@ -377,47 +383,6 @@ async def on_message(message):
                 "channel_id": message.channel.id,
                 "user_id": message.author.id,
             }
-
-        # Ignore if the mention is from yourself
-        if message.author.id == YOUR_USER_ID:
-            print("   ⏭️  Ignoring reply - mention from yourself")
-            print("-" * 60)
-            return
-
-        # Check cooldown (shared with DM cooldown, per user)
-        on_cooldown = False
-        if message.author.id in cooldowns:
-            if datetime.now() < cooldowns[message.author.id]:
-                remaining = int((cooldowns[message.author.id] - datetime.now()).total_seconds())
-                print(f"   ⏳ Reply cooldown: {remaining}s remaining (relay still sent)")
-                on_cooldown = True
-
-        if not on_cooldown:
-            try:
-                # Get your current status
-                status = 'offline'
-                for guild in bot.guilds:
-                    member = guild.get_member(YOUR_USER_ID)
-                    if member and member.status:
-                        status = str(member.status)
-                        print(f"   📌 Your status: {status} (from {guild.name})")
-                        break
-                else:
-                    print("   ⚠️ Could not find your member object in any guild "
-                          "(status defaulting to 'offline').")
-
-                reply = get_reply(status)
-                await message.reply(reply)
-
-                cooldowns[message.author.id] = datetime.now() + timedelta(minutes=COOLDOWN_MINUTES)
-
-                print(f"   ✅ In-channel reply sent to {message.author}")
-                print(f"   📝 Reply: {reply[:50]}...")
-
-            except discord.Forbidden:
-                print(f"   ❌ Cannot reply in #{message.channel} (missing permissions)")
-            except Exception as e:
-                print(f"   ❌ Error sending channel reply: {e}")
 
         print("-" * 60)
         return
