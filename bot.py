@@ -57,6 +57,11 @@ relay_map = {}
 # Remembers the most recent DM sender, so "!r <message>" works without
 # needing to reply to a specific relayed message.
 last_dm_sender_id = None
+# Timestamp of when last_dm_sender_id was set, and who else has DMed recently,
+# so !r can warn if it might be replying to the wrong person.
+last_dm_sender_time = None
+recent_dm_senders = {}  # user_id -> datetime of their most recent DM
+AMBIGUITY_WINDOW_MINUTES = 10
 
 # Create bot with all required intents
 intents = discord.Intents.default()
@@ -158,7 +163,7 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     """Handle all incoming messages"""
-    global last_dm_sender_id
+    global last_dm_sender_id, last_dm_sender_time
 
     # Ignore messages from bots (including itself)
     if message.author.bot:
@@ -191,15 +196,76 @@ async def on_message(message):
                 await message.reply(f"❌ Error forwarding reply: {e}")
             return
 
-        # Option B: quick reply to the most recent DM sender, e.g. "!r on my way"
+        # Option B: reply via the bot, e.g. "!r on my way" (most recent sender)
+        # or "!r <user_id> on my way" (explicit target, works for anyone who's
+        # ever DMed the bot this session)
         if message.content.startswith('!r '):
+            raw = message.content[len('!r '):].strip()
+            if not raw:
+                await message.reply(
+                    "⚠️ Usage:\n"
+                    "`!r <message>` — replies to your most recent DM\n"
+                    "`!r <user_id> <message>` — replies to a specific person (ID shown in their relay message)"
+                )
+                return
+
+            # Check for explicit "!r <user_id> <message>" targeting
+            parts = raw.split(maxsplit=1)
+            explicit_target_id = None
+            if parts[0].isdigit() and len(parts) > 1:
+                explicit_target_id = int(parts[0])
+                reply_text = parts[1]
+            else:
+                reply_text = raw
+
+            if explicit_target_id is not None:
+                try:
+                    target_user = await bot.fetch_user(explicit_target_id)
+                    await target_user.send(reply_text)
+                    await message.add_reaction("✅")
+                    print(f"   ↩️  Owner reply forwarded to {target_user} via DM (explicit ID)")
+                except discord.NotFound:
+                    await message.reply(f"❌ No Discord user found with ID `{explicit_target_id}`.")
+                except discord.Forbidden:
+                    await message.reply("❌ Couldn't deliver that — they may have DMs closed or blocked the bot.")
+                except Exception as e:
+                    await message.reply(f"❌ Error forwarding reply: {e}")
+                return
+
+            # No explicit ID given — fall back to "most recent sender" with
+            # an ambiguity check if multiple people have DMed recently.
             if last_dm_sender_id is None:
                 await message.reply("⚠️ No recent DM to reply to yet.")
                 return
-            reply_text = message.content[len('!r '):].strip()
-            if not reply_text:
-                await message.reply("⚠️ Usage: `!r <your message>`")
+
+            now = datetime.now()
+            window = timedelta(minutes=AMBIGUITY_WINDOW_MINUTES)
+            recent_others = [
+                uid for uid, ts in recent_dm_senders.items()
+                if uid != last_dm_sender_id and now - ts <= window
+            ]
+
+            if recent_others:
+                try:
+                    target_preview = await bot.fetch_user(last_dm_sender_id)
+                except Exception:
+                    target_preview = last_dm_sender_id
+                others_preview = []
+                for uid in recent_others:
+                    try:
+                        u = await bot.fetch_user(uid)
+                        others_preview.append(f"{u} (ID: {uid})")
+                    except Exception:
+                        others_preview.append(f"ID: {uid}")
+                await message.reply(
+                    f"⚠️ More than one person has DMed you recently, so `!r` alone is ambiguous.\n"
+                    f"Most recent: **{target_preview}** (ID: `{last_dm_sender_id}`)\n"
+                    f"Also recent: {', '.join(others_preview)}\n\n"
+                    f"Use `!r <user_id> <message>` to target one directly, or reply "
+                    f"natively to their relay message."
+                )
                 return
+
             try:
                 target_user = await bot.fetch_user(last_dm_sender_id)
                 await target_user.send(reply_text)
@@ -239,6 +305,8 @@ async def on_message(message):
 
         # Always relay the DM content to the owner, regardless of cooldown
         last_dm_sender_id = message.author.id
+        last_dm_sender_time = datetime.now()
+        recent_dm_senders[message.author.id] = last_dm_sender_time
         relayed = await relay_to_owner(
             f"📨 **New DM from {message.author} ({message.author.id}):**\n{message.content}\n"
             f"-# Reply to this message, or use `!r <text>`, to respond."
