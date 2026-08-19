@@ -49,6 +49,15 @@ print("=" * 60)
 COOLDOWN_MINUTES = 10
 cooldowns = {}
 
+# Maps a relayed message ID (sent to the owner) -> info needed to reply back.
+# For DMs:      {"type": "dm", "user_id": <sender id>}
+# For mentions:  {"type": "mention", "channel_id": <channel id>, "user_id": <sender id>}
+relay_map = {}
+
+# Remembers the most recent DM sender, so "!r <message>" works without
+# needing to reply to a specific relayed message.
+last_dm_sender_id = None
+
 # Create bot with all required intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -88,18 +97,22 @@ def get_reply(status):
 
 
 async def relay_to_owner(content: str):
-    """Send a message to the bot owner's DMs (from the bot, not as the user)."""
+    """Send a message to the bot owner's DMs (from the bot, not as the user).
+    Returns the sent Message object (or None on failure) so the caller can
+    map it in relay_map for two-way replies."""
     try:
         owner = await bot.fetch_user(YOUR_USER_ID)
         # Discord DMs cap at 2000 chars; trim defensively
         if len(content) > 1900:
             content = content[:1900] + "\n...(truncated)"
-        await owner.send(content)
+        sent = await owner.send(content)
         print("   📤 Relayed to owner")
+        return sent
     except discord.Forbidden:
         print("   ❌ Could not relay to owner (owner has DMs from the bot disabled/blocked)")
     except Exception as e:
         print(f"   ❌ Error relaying to owner: {e}")
+    return None
 
 
 @bot.event
@@ -150,6 +163,53 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # === OWNER REPLYING THROUGH THE BOT ===
+    # Only applies to messages the owner sends to the bot in DM.
+    if isinstance(message.channel, discord.DMChannel) and message.author.id == YOUR_USER_ID:
+
+        # Option A: owner used Discord's native "Reply" on a relayed message
+        if message.reference and message.reference.message_id in relay_map:
+            info = relay_map[message.reference.message_id]
+            try:
+                if info["type"] == "dm":
+                    target_user = await bot.fetch_user(info["user_id"])
+                    await target_user.send(message.content)
+                    await message.add_reaction("✅")
+                    print(f"   ↩️  Owner reply forwarded to {target_user} via DM")
+                elif info["type"] == "mention":
+                    channel = bot.get_channel(info["channel_id"])
+                    if channel:
+                        await channel.send(f"<@{info['user_id']}> {message.content}")
+                        await message.add_reaction("✅")
+                        print(f"   ↩️  Owner reply forwarded to #{channel}")
+                    else:
+                        await message.reply("❌ Couldn't find that channel anymore.")
+            except discord.Forbidden:
+                await message.reply("❌ Couldn't deliver that — they may have DMs closed or blocked the bot.")
+            except Exception as e:
+                await message.reply(f"❌ Error forwarding reply: {e}")
+            return
+
+        # Option B: quick reply to the most recent DM sender, e.g. "!r on my way"
+        if message.content.startswith('!r '):
+            if last_dm_sender_id is None:
+                await message.reply("⚠️ No recent DM to reply to yet.")
+                return
+            reply_text = message.content[len('!r '):].strip()
+            if not reply_text:
+                await message.reply("⚠️ Usage: `!r <your message>`")
+                return
+            try:
+                target_user = await bot.fetch_user(last_dm_sender_id)
+                await target_user.send(reply_text)
+                await message.add_reaction("✅")
+                print(f"   ↩️  Owner quick-reply forwarded to {target_user} via DM")
+            except discord.Forbidden:
+                await message.reply("❌ Couldn't deliver that — they may have DMs closed or blocked the bot.")
+            except Exception as e:
+                await message.reply(f"❌ Error forwarding reply: {e}")
+            return
+
     # === TEST COMMAND ===
     if message.content.startswith('!testdm'):
         try:
@@ -177,9 +237,14 @@ async def on_message(message):
             return
 
         # Always relay the DM content to the owner, regardless of cooldown
-        await relay_to_owner(
-            f"📨 **New DM from {message.author} ({message.author.id}):**\n{message.content}"
+        global last_dm_sender_id
+        last_dm_sender_id = message.author.id
+        relayed = await relay_to_owner(
+            f"📨 **New DM from {message.author} ({message.author.id}):**\n{message.content}\n"
+            f"-# Reply to this message, or use `!r <text>`, to respond."
         )
+        if relayed:
+            relay_map[relayed.id] = {"type": "dm", "user_id": message.author.id}
 
         # Check cooldown for the auto-reply (relay above is not subject to this)
         on_cooldown = False
@@ -233,10 +298,17 @@ async def on_message(message):
         print(f"   Content: {message.content[:100]}")
 
         # Always relay to owner, regardless of cooldown
-        await relay_to_owner(
+        relayed = await relay_to_owner(
             f"🔔 **{message.author}** mentioned you in **#{message.channel}** "
-            f"({message.guild.name}):\n{message.content}"
+            f"({message.guild.name}):\n{message.content}\n"
+            f"-# Reply to this message to respond in that channel."
         )
+        if relayed:
+            relay_map[relayed.id] = {
+                "type": "mention",
+                "channel_id": message.channel.id,
+                "user_id": message.author.id,
+            }
 
         # Ignore if the mention is from yourself
         if message.author.id == YOUR_USER_ID:
