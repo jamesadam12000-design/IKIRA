@@ -4,31 +4,62 @@ import sys
 import asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import random
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
 TOKEN = os.getenv('DISCORD_TOKEN')
-YOUR_USER_ID = int(os.getenv('YOUR_USER_ID')) if os.getenv('YOUR_USER_ID') else None
+YOUR_USER_ID = os.getenv('YOUR_USER_ID')
 
+# Debug startup
+print("=" * 60)
+print("🤖 DISCORD DM AUTO-REPLY BOT")
+print("=" * 60)
+
+# Check token
 if not TOKEN:
-    print("❌ DISCORD_TOKEN not found")
+    print("❌ ERROR: DISCORD_TOKEN not found in environment variables")
+    print("💡 Please add DISCORD_TOKEN to Railway variables")
     sys.exit(1)
 
+# Check user ID
 if not YOUR_USER_ID:
-    print("❌ YOUR_USER_ID not found")
+    print("❌ ERROR: YOUR_USER_ID not found in environment variables")
+    print("💡 Please add YOUR_USER_ID to Railway variables")
     sys.exit(1)
 
-print(f"📝 Token loaded: {TOKEN[:10]}...")
-print(f"👤 User ID: {YOUR_USER_ID}")
+# Convert user ID to int
+try:
+    YOUR_USER_ID = int(YOUR_USER_ID)
+    print(f"✅ User ID loaded: {YOUR_USER_ID}")
+except ValueError:
+    print(f"❌ ERROR: YOUR_USER_ID must be a number, got: {YOUR_USER_ID}")
+    sys.exit(1)
+
+print(f"✅ Token loaded: {TOKEN[:15]}... (length: {len(TOKEN)})")
+print("=" * 60)
 
 # Bot configuration
 COOLDOWN_MINUTES = 5
+cooldowns = {}
 
-# Reply messages
-DM_REPLY_MESSAGES = {
+# Create bot with all required intents
+intents = discord.Intents.default()
+intents.message_content = True
+intents.dm_messages = True
+intents.guilds = True
+intents.members = True
+intents.presences = True
+
+bot = discord.Client(intents=intents)
+
+# Reply messages based on status
+REPLY_MESSAGES = {
     'online': [
         "Hey! I'm currently online but might be busy. I'll get back to you soon! 👋",
         "Hi! I'm online but AFK at the moment. Will reply when I can! 💻"
@@ -44,129 +75,156 @@ DM_REPLY_MESSAGES = {
     'offline': [
         "Hey! I'm currently offline. I'll reply when I come back online! 💤",
         "Hi! I'm not online right now. Will respond when I'm back! 🌙"
-    ],
-    'unknown': "Hey! Thanks for DMing me! I'll get back to you as soon as possible! 📨"
+    ]
 }
 
-cooldowns = {}
-
-# Bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-intents.dm_messages = True
-intents.guilds = True
-intents.members = True
-intents.presences = True
-
-bot = discord.Client(intents=intents)
-
-def get_random_message(messages):
-    if isinstance(messages, list):
-        return random.choice(messages)
-    return messages
+def get_reply(status):
+    """Get a random reply based on status"""
+    import random
+    if status in REPLY_MESSAGES:
+        return random.choice(REPLY_MESSAGES[status])
+    return "Hey! Thanks for DMing me! I'll get back to you soon! 📨"
 
 @bot.event
 async def on_ready():
-    """Called when bot successfully connects"""
-    print("═══════════════════════════════════════════")
-    print(f"✅ BOT ONLINE! Logged in as {bot.user.name}")
+    """Called when bot connects to Discord"""
+    print("=" * 60)
+    print(f"✅ BOT ONLINE SUCCESSFULLY!")
+    print(f"📋 Bot Name: {bot.user.name}")
     print(f"📋 Bot ID: {bot.user.id}")
     print(f"👥 Connected to {len(bot.guilds)} server(s)")
-    print(f"📨 Monitoring DMs for user ID: {YOUR_USER_ID}")
-    print("═══════════════════════════════════════════")
+    print("-" * 60)
     
-    # Set status
+    # List all servers and check if you're in them
+    for guild in bot.guilds:
+        print(f"📁 Server: {guild.name} (ID: {guild.id})")
+        try:
+            member = guild.get_member(YOUR_USER_ID)
+            if member:
+                print(f"   ✅ YOU are in this server! Status: {member.status}")
+            else:
+                print(f"   ⚠️ You are NOT in this server (bot can't DM you here)")
+        except:
+            print(f"   ⚠️ Could not check membership")
+    
+    print("=" * 60)
+    print("📨 Bot is now MONITORING for DMs...")
+    print("💡 Test: Have a friend DM your Discord account!")
+    print("⚠️  Note: Bot will NOT reply to your own DMs")
+    print("=" * 60)
+    
+    # Set bot status
     try:
         await bot.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name=f"DMs for {bot.user.name}"
+                name="for DMs"
             )
         )
-        print("✅ Status updated")
-    except Exception as e:
-        print(f"⚠️ Status update error: {e}")
+    except:
+        pass
 
 @bot.event
 async def on_message(message):
-    """Handle incoming messages"""
-    # Ignore bots
+    """Handle all incoming messages"""
+    
+    # Ignore messages from bots
     if message.author.bot:
         return
     
-    # Only handle DMs
+    # === TEST COMMAND ===
+    if message.content.startswith('!testdm'):
+        try:
+            await message.author.send("✅ Test successful! The bot can send you DMs!")
+            await message.reply("📨 Check your DMs!")
+            print(f"📨 Test DM sent to {message.author}")
+        except discord.Forbidden:
+            await message.reply("❌ I can't DM you! Please enable DMs from server members.")
+        except Exception as e:
+            await message.reply(f"❌ Error: {e}")
+        return
+    
+    # === HANDLE DMs ONLY ===
+    # Check if it's a DM
     if not isinstance(message.channel, discord.DMChannel):
         return
     
-    # Ignore if from yourself
-    if message.author.id == YOUR_USER_ID:
-        return
+    # Log the DM
+    print("-" * 60)
+    print(f"📨 DM RECEIVED")
+    print(f"   From: {message.author} (ID: {message.author.id})")
+    print(f"   Content: {message.content[:100]}")
+    print(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
     
-    print(f"📨 DM from: {message.author} | Content: {message.content[:50]}")
+    # Ignore if DM is from yourself (prevents infinite loops)
+    if message.author.id == YOUR_USER_ID:
+        print("   ⏭️  Ignoring - DM from yourself")
+        print("-" * 60)
+        return
     
     # Check cooldown
     if message.author.id in cooldowns:
         if datetime.now() < cooldowns[message.author.id]:
             remaining = int((cooldowns[message.author.id] - datetime.now()).total_seconds())
-            print(f"⏳ Cooldown: {remaining}s remaining")
+            print(f"   ⏳ Cooldown: {remaining}s remaining")
+            print("-" * 60)
             return
     
     try:
-        # Get your status
+        # Get your current status
         status = 'offline'
         for guild in bot.guilds:
             member = guild.get_member(YOUR_USER_ID)
             if member and member.status:
                 status = str(member.status)
+                print(f"   📌 Your status: {status} (from {guild.name})")
                 break
         
-        # Get reply
-        if status in DM_REPLY_MESSAGES:
-            reply = get_random_message(DM_REPLY_MESSAGES[status])
-        else:
-            reply = DM_REPLY_MESSAGES['unknown']
+        # Get reply message
+        reply = get_reply(status)
         
-        # Send reply
-        embed = discord.Embed(
-            title="📩 Auto-Reply",
-            description=reply,
-            color=(
-                discord.Color.green() if status == 'online' else
-                discord.Color.gold() if status == 'idle' else
-                discord.Color.red() if status == 'dnd' else
-                discord.Color.greyple()
-            ),
-            timestamp=datetime.utcnow()
-        )
-        embed.add_field(name="📌 My Status", value=f"`{status.upper()}`", inline=True)
-        embed.set_footer(text=f"Auto-reply by {bot.user.name}")
+        # Send the reply
+        await message.reply(reply)
         
-        await message.reply(embed=embed)
+        # Set cooldown
         cooldowns[message.author.id] = datetime.now() + timedelta(minutes=COOLDOWN_MINUTES)
-        print(f"✅ Replied to {message.author}")
         
+        print(f"   ✅ Auto-reply sent to {message.author}")
+        print(f"   📝 Reply: {reply[:50]}...")
+        
+    except discord.Forbidden:
+        print(f"   ❌ Cannot send DM to {message.author} (blocked or DMs disabled)")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"   ❌ Error sending reply: {e}")
+        # Try fallback
         try:
             await message.reply("Hey! Thanks for your message! I'll get back to you soon! 📨")
+            print(f"   ✅ Fallback reply sent")
         except:
             pass
+    
+    print("-" * 60)
 
 @bot.event
 async def on_error(event, *args, **kwargs):
-    print(f"❌ Error in {event}")
+    """Global error handler"""
+    print(f"❌ Error in {event}: {args[0] if args else 'Unknown'}")
 
 @bot.event
 async def on_disconnect():
+    """Called when bot disconnects"""
     print("⚠️ Disconnected from Discord")
 
 @bot.event
 async def on_resumed():
+    """Called when bot reconnects"""
     print("✅ Reconnected to Discord")
 
-# Keep bot alive on Railway
+# Keep alive task for Railway
 async def keep_alive():
+    """Prevent Railway from killing the bot"""
     await bot.wait_until_ready()
+    counter = 0
     while not bot.is_closed():
         try:
             # Clean expired cooldowns
@@ -175,26 +233,29 @@ async def keep_alive():
             for uid in expired:
                 del cooldowns[uid]
             
-            # Log heartbeat
-            print(f"💓 Bot is alive | {len(bot.guilds)} servers | {len(bot.users)} users")
+            # Log heartbeat every 30 seconds
+            counter += 1
+            if counter % 2 == 0:  # Every minute
+                print(f"💓 Bot is alive | {len(bot.guilds)} servers | {len(bot.users)} users")
             
         except Exception as e:
             print(f"⚠️ Keep-alive error: {e}")
         
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
 
 @bot.event
 async def on_ready():
+    """Start keep-alive after bot is ready"""
     bot.loop.create_task(keep_alive())
 
 # Run the bot
 if __name__ == "__main__":
+    print("🚀 Starting bot...")
     try:
-        print("🚀 Starting bot...")
-        bot.run(TOKEN, log_level=20)  # log_level=20 = INFO
+        bot.run(TOKEN)
     except discord.LoginFailure:
-        print("❌ Login failed! Check your token")
+        print("❌ Login failed! Invalid token")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Fatal error: {e}")
         sys.exit(1)
