@@ -158,6 +158,7 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     """Handle all incoming messages"""
+    global last_dm_sender_id
 
     # Ignore messages from bots (including itself)
     if message.author.bot:
@@ -237,7 +238,6 @@ async def on_message(message):
             return
 
         # Always relay the DM content to the owner, regardless of cooldown
-        global last_dm_sender_id
         last_dm_sender_id = message.author.id
         relayed = await relay_to_owner(
             f"📨 **New DM from {message.author} ({message.author.id}):**\n{message.content}\n"
