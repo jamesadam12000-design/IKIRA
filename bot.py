@@ -122,13 +122,14 @@ def build_thread_embed(user_id: int, author_name: str, kind: str) -> discord.Emb
     return embed
 
 
-async def send_notification_ping(user_id: int):
+async def send_notification_ping(user_id: int, author_name: str):
     """Send a tiny message to trigger a real Discord notification (edits
     don't notify), then delete it after a few seconds so it leaves no
-    lasting clutter in the DM."""
+    lasting clutter in the DM. Includes the sender's name so it's clear
+    which conversation to check when multiple people are messaging."""
     try:
         owner = await bot.fetch_user(YOUR_USER_ID)
-        ping = await owner.send("🔔 New message — check the container above")
+        ping = await owner.send(f"🔔 New message from **{author_name}** — check their container above")
         await asyncio.sleep(4)
         try:
             await ping.delete()
@@ -160,7 +161,7 @@ async def relay_thread_update(user_id: int, author_name: str, kind: str, channel
                 edited = await existing.edit(embed=embed, view=view)
                 print("   📤 Updated existing container for this person")
                 if notify:
-                    bot.loop.create_task(send_notification_ping(user_id))
+                    bot.loop.create_task(send_notification_ping(user_id, author_name))
                 return edited
             except (discord.NotFound, discord.HTTPException) as e:
                 print(f"   ⚠️ Couldn't edit existing container ({e}), sending a new one")
