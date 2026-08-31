@@ -122,10 +122,34 @@ def build_thread_embed(user_id: int, author_name: str, kind: str) -> discord.Emb
     return embed
 
 
-async def relay_thread_update(user_id: int, author_name: str, kind: str, channel_id: int = None):
+async def send_notification_ping(user_id: int):
+    """Send a tiny message to trigger a real Discord notification (edits
+    don't notify), then delete it after a few seconds so it leaves no
+    lasting clutter in the DM."""
+    try:
+        owner = await bot.fetch_user(YOUR_USER_ID)
+        ping = await owner.send("🔔 New message — check the container above")
+        await asyncio.sleep(4)
+        try:
+            await ping.delete()
+        except (discord.NotFound, discord.HTTPException):
+            pass
+    except Exception as e:
+        print(f"   ⚠️ Notification ping failed: {e}")
+
+
+async def relay_thread_update(user_id: int, author_name: str, kind: str, channel_id: int = None,
+                               notify: bool = True):
     """Edit the existing container for this person if one exists, otherwise
     create it. Returns the message (new or edited) so callers can (re)map it
-    in relay_map, or None on failure."""
+    in relay_map, or None on failure.
+
+    notify=True sends a brief self-deleting ping alongside edits, since
+    Discord does not push a notification for message edits — only for new
+    messages. Pass notify=False when the update is the OWNER's own action
+    (e.g. after sending a reply), since there's no need to notify yourself
+    about your own message.
+    """
     embed = build_thread_embed(user_id, author_name, kind)
     view = ThreadView(user_id, kind, channel_id)
     try:
@@ -135,10 +159,14 @@ async def relay_thread_update(user_id: int, author_name: str, kind: str, channel
             try:
                 edited = await existing.edit(embed=embed, view=view)
                 print("   📤 Updated existing container for this person")
+                if notify:
+                    bot.loop.create_task(send_notification_ping(user_id))
                 return edited
             except (discord.NotFound, discord.HTTPException) as e:
                 print(f"   ⚠️ Couldn't edit existing container ({e}), sending a new one")
 
+        # First message from this person — a brand-new message already
+        # triggers a normal notification, no extra ping needed.
         sent = await owner.send(embed=embed, view=view)
         active_thread_message[user_id] = sent
         print("   📤 Created new container for this person")
@@ -357,7 +385,7 @@ async def on_message(message):
                     target_user = await bot.fetch_user(info["user_id"])
                     await target_user.send(message.content)
                     log_conversation(info["user_id"], "you", message.content)
-                    relayed = await relay_thread_update(info["user_id"], str(target_user), "dm")
+                    relayed = await relay_thread_update(info["user_id"], str(target_user), "dm", notify=False)
                     if relayed:
                         relay_map[relayed.id] = {"type": "dm", "user_id": info["user_id"]}
                     await message.add_reaction("✅")
@@ -372,7 +400,7 @@ async def on_message(message):
                             name = str(target_user)
                         except Exception:
                             name = f"User {info['user_id']}"
-                        relayed = await relay_thread_update(info["user_id"], name, "mention", info["channel_id"])
+                        relayed = await relay_thread_update(info["user_id"], name, "mention", info["channel_id"], notify=False)
                         if relayed:
                             relay_map[relayed.id] = {
                                 "type": "mention",
@@ -416,7 +444,7 @@ async def on_message(message):
                     target_user = await bot.fetch_user(explicit_target_id)
                     await target_user.send(reply_text)
                     log_conversation(explicit_target_id, "you", reply_text)
-                    relayed = await relay_thread_update(explicit_target_id, str(target_user), "dm")
+                    relayed = await relay_thread_update(explicit_target_id, str(target_user), "dm", notify=False)
                     if relayed:
                         relay_map[relayed.id] = {"type": "dm", "user_id": explicit_target_id}
                     await message.add_reaction("✅")
@@ -467,7 +495,7 @@ async def on_message(message):
                 target_user = await bot.fetch_user(last_dm_sender_id)
                 await target_user.send(reply_text)
                 log_conversation(last_dm_sender_id, "you", reply_text)
-                relayed = await relay_thread_update(last_dm_sender_id, str(target_user), "dm")
+                relayed = await relay_thread_update(last_dm_sender_id, str(target_user), "dm", notify=False)
                 if relayed:
                     relay_map[relayed.id] = {"type": "dm", "user_id": last_dm_sender_id}
                 await message.add_reaction("✅")
