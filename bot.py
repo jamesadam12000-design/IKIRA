@@ -98,14 +98,21 @@ active_thread_message = {}  # user_id -> discord.Message
 
 def build_thread_embed(user_id: int, author_name: str, kind: str) -> discord.Embed:
     history = conversation_history.get(user_id, [])
-    lines = []
+
+    RIGHT_INDENT = " " * 34  # spacing to push "you" lines to the right
+    blocks = []
     for entry in history:
-        who = "**You**" if entry["from"] == "you" else f"**{author_name}**"
-        when = entry["time"].strftime("%b %d, %I:%M %p")
-        lines.append(f"{who} ({when}): {entry['text']}")
-    description = "\n\n".join(lines) if lines else "No messages yet."
-    if len(description) > 4000:
-        description = "...(earlier messages trimmed)\n\n" + description[-3900:]
+        text = entry["text"]
+        if entry["from"] == "you":
+            blocks.append(f"{RIGHT_INDENT}You:\n{RIGHT_INDENT}{text}")
+        else:
+            blocks.append(f"{author_name}:\n{text}")
+
+    body = "\n\n".join(blocks) if blocks else "No messages yet."
+    # Code block preserves the spacing needed for the right-indent effect
+    if len(body) > 3900:
+        body = "...(earlier messages trimmed)\n\n" + body[-3800:]
+    description = f"```\n{body}\n```"
 
     embed = discord.Embed(description=description, color=get_person_color(user_id),
                            timestamp=datetime.now())
@@ -460,17 +467,8 @@ async def on_message(message):
         except Exception:
             name = f"User {target_id}"
 
-        lines = []
-        for entry in history:
-            who = "**You**" if entry["from"] == "you" else f"**{name}**"
-            when = entry["time"].strftime("%b %d, %H:%M")
-            lines.append(f"{who} ({when}): {entry['text']}")
-
-        embed = discord.Embed(
-            title=f"💬 Conversation with {name}",
-            description="\n\n".join(lines),
-            color=get_person_color(target_id),
-        )
+        embed = build_thread_embed(target_id, name, "dm")
+        embed.title = f"💬 Conversation with {name}"
         embed.set_footer(text=f"ID: {target_id}")
         await message.reply(embed=embed)
         return
@@ -633,3 +631,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Fatal error: {e}")
         sys.exit(1)
+        
