@@ -63,6 +63,32 @@ last_dm_sender_time = None
 recent_dm_senders = {}  # user_id -> datetime of their most recent DM
 AMBIGUITY_WINDOW_MINUTES = 10
 
+# --- Per-person conversation history (in-memory "inbox") ---
+# user_id -> list of {"from": "them" | "you", "text": str, "time": datetime}
+conversation_history = {}
+HISTORY_LIMIT = 20  # how many messages to keep per person
+
+# Assigns each person a consistent color for their embeds, so scrolling your
+# DM with the bot, you can visually tell conversations apart at a glance.
+PERSON_COLORS = [
+    0xE74C3C, 0x3498DB, 0x2ECC71, 0xF1C40F, 0x9B59B6,
+    0x1ABC9C, 0xE67E22, 0xE91E63, 0x00BCD4, 0x8BC34A,
+]
+person_color_map = {}  # user_id -> color int
+
+
+def get_person_color(user_id: int) -> int:
+    if user_id not in person_color_map:
+        person_color_map[user_id] = PERSON_COLORS[len(person_color_map) % len(PERSON_COLORS)]
+    return person_color_map[user_id]
+
+
+def log_conversation(user_id: int, sender: str, text: str):
+    history = conversation_history.setdefault(user_id, [])
+    history.append({"from": sender, "text": text, "time": datetime.now()})
+    if len(history) > HISTORY_LIMIT:
+        del history[0]
+
 # Create bot with all required intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -101,16 +127,30 @@ def get_reply(status):
     return "Hey! Thanks for DMing me! I'll get back to you soon! 📨"
 
 
-async def relay_to_owner(content: str):
-    """Send a message to the bot owner's DMs (from the bot, not as the user).
+async def relay_to_owner(content: str, user_id: int = None, author_name: str = None,
+                          kind: str = "dm", footer: str = None):
+    """Send a message to the bot owner's DMs (from the bot, not as the user),
+    as a color-coded embed so each person's thread is visually distinct in
+    your DM history with the bot.
     Returns the sent Message object (or None on failure) so the caller can
     map it in relay_map for two-way replies."""
     try:
         owner = await bot.fetch_user(YOUR_USER_ID)
-        # Discord DMs cap at 2000 chars; trim defensively
-        if len(content) > 1900:
-            content = content[:1900] + "\n...(truncated)"
-        sent = await owner.send(content)
+        if len(content) > 3900:
+            content = content[:3900] + "\n...(truncated)"
+
+        if user_id is not None:
+            color = get_person_color(user_id)
+            embed = discord.Embed(description=content, color=color,
+                                   timestamp=datetime.now())
+            icon = "📨" if kind == "dm" else "🔔"
+            embed.set_author(name=f"{icon} {author_name}" if author_name else icon)
+            if footer:
+                embed.set_footer(text=footer)
+            sent = await owner.send(embed=embed)
+        else:
+            sent = await owner.send(content)
+
         print("   📤 Relayed to owner")
         return sent
     except discord.Forbidden:
@@ -180,12 +220,14 @@ async def on_message(message):
                 if info["type"] == "dm":
                     target_user = await bot.fetch_user(info["user_id"])
                     await target_user.send(message.content)
+                    log_conversation(info["user_id"], "you", message.content)
                     await message.add_reaction("✅")
                     print(f"   ↩️  Owner reply forwarded to {target_user} via DM")
                 elif info["type"] == "mention":
                     channel = bot.get_channel(info["channel_id"])
                     if channel:
                         await channel.send(f"<@{info['user_id']}> {message.content}")
+                        log_conversation(info["user_id"], "you", message.content)
                         await message.add_reaction("✅")
                         print(f"   ↩️  Owner reply forwarded to #{channel}")
                     else:
@@ -222,6 +264,7 @@ async def on_message(message):
                 try:
                     target_user = await bot.fetch_user(explicit_target_id)
                     await target_user.send(reply_text)
+                    log_conversation(explicit_target_id, "you", reply_text)
                     await message.add_reaction("✅")
                     print(f"   ↩️  Owner reply forwarded to {target_user} via DM (explicit ID)")
                 except discord.NotFound:
@@ -269,6 +312,7 @@ async def on_message(message):
             try:
                 target_user = await bot.fetch_user(last_dm_sender_id)
                 await target_user.send(reply_text)
+                log_conversation(last_dm_sender_id, "you", reply_text)
                 await message.add_reaction("✅")
                 print(f"   ↩️  Owner quick-reply forwarded to {target_user} via DM")
             except discord.Forbidden:
@@ -276,6 +320,86 @@ async def on_message(message):
             except Exception as e:
                 await message.reply(f"❌ Error forwarding reply: {e}")
             return
+
+    # === OWNER: !inbox — list all conversations, most recently active first ===
+    if isinstance(message.channel, discord.DMChannel) and message.author.id == YOUR_USER_ID \
+            and message.content.strip() == '!inbox':
+        if not conversation_history:
+            await message.reply("📭 Your inbox is empty — no conversations yet.")
+            return
+
+        # Sort by most recent message time, descending
+        sorted_users = sorted(
+            conversation_history.items(),
+            key=lambda item: item[1][-1]["time"] if item[1] else datetime.min,
+            reverse=True,
+        )
+
+        embed = discord.Embed(
+            title="📥 Inbox",
+            description="Most recent conversations first. Use `!history <id>` to open a full thread.",
+            color=0x2C2F33,
+            timestamp=datetime.now(),
+        )
+        for user_id, history in sorted_users[:20]:
+            if not history:
+                continue
+            try:
+                user = await bot.fetch_user(user_id)
+                name = str(user)
+            except Exception:
+                name = f"User {user_id}"
+
+            last = history[-1]
+            prefix = "You: " if last["from"] == "you" else ""
+            preview = last["text"]
+            if len(preview) > 100:
+                preview = preview[:100] + "..."
+            when = last["time"].strftime("%b %d, %H:%M")
+
+            embed.add_field(
+                name=f"{name}  •  {when}",
+                value=f"{prefix}{preview}\n-# ID: `{user_id}`",
+                inline=False,
+            )
+
+        await message.reply(embed=embed)
+        return
+
+    # === OWNER: !history <id> — full thread with one person ===
+    if isinstance(message.channel, discord.DMChannel) and message.author.id == YOUR_USER_ID \
+            and message.content.startswith('!history'):
+        parts = message.content.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await message.reply("⚠️ Usage: `!history <user_id>` (ID shown in their inbox entry or relay message)")
+            return
+
+        target_id = int(parts[1].strip())
+        history = conversation_history.get(target_id)
+        if not history:
+            await message.reply("📭 No conversation history found for that ID yet.")
+            return
+
+        try:
+            user = await bot.fetch_user(target_id)
+            name = str(user)
+        except Exception:
+            name = f"User {target_id}"
+
+        lines = []
+        for entry in history:
+            who = "**You**" if entry["from"] == "you" else f"**{name}**"
+            when = entry["time"].strftime("%b %d, %H:%M")
+            lines.append(f"{who} ({when}): {entry['text']}")
+
+        embed = discord.Embed(
+            title=f"💬 Conversation with {name}",
+            description="\n\n".join(lines),
+            color=get_person_color(target_id),
+        )
+        embed.set_footer(text=f"ID: {target_id}")
+        await message.reply(embed=embed)
+        return
 
     # === TEST COMMAND ===
     if message.content.startswith('!testdm'):
@@ -307,9 +431,13 @@ async def on_message(message):
         last_dm_sender_id = message.author.id
         last_dm_sender_time = datetime.now()
         recent_dm_senders[message.author.id] = last_dm_sender_time
+        log_conversation(message.author.id, "them", message.content)
         relayed = await relay_to_owner(
-            f"📨 **New DM from {message.author} ({message.author.id}):**\n{message.content}\n"
-            f"-# Reply to this message, or use `!r <text>`, to respond."
+            f"{message.content}\n\n"
+            f"-# ID: `{message.author.id}` • Reply here, or use `!r <text>` / `!r {message.author.id} <text>`",
+            user_id=message.author.id,
+            author_name=str(message.author),
+            kind="dm",
         )
         if relayed:
             relay_map[relayed.id] = {"type": "dm", "user_id": message.author.id}
@@ -372,10 +500,15 @@ async def on_message(message):
             return
 
         # Relay to owner only — bot does NOT reply in the channel
+        log_conversation(message.author.id, "them",
+                          f"[in #{message.channel}] {message.content}")
         relayed = await relay_to_owner(
-            f"🔔 **{message.author}** mentioned you in **#{message.channel}** "
-            f"({message.guild.name}):\n{message.content}\n"
-            f"-# Reply to this message to respond in that channel."
+            f"{message.content}\n\n"
+            f"-# Mentioned you in **#{message.channel}** ({message.guild.name}) • "
+            f"ID: `{message.author.id}` • Reply here to respond in that channel",
+            user_id=message.author.id,
+            author_name=str(message.author),
+            kind="mention",
         )
         if relayed:
             relay_map[relayed.id] = {
