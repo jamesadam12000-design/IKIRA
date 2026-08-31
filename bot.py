@@ -118,27 +118,28 @@ def build_thread_embed(user_id: int, author_name: str, kind: str) -> discord.Emb
                            timestamp=datetime.now())
     icon = "📨" if kind == "dm" else "🔔"
     embed.set_author(name=f"{icon} {author_name}")
-    embed.set_footer(text=f"ID: {user_id} • Reply here, or use !r <text> / !r {user_id} <text>")
+    embed.set_footer(text=f"ID: {user_id} • Tap 💬 Reply to respond, no typing clutter")
     return embed
 
 
-async def relay_thread_update(user_id: int, author_name: str, kind: str):
+async def relay_thread_update(user_id: int, author_name: str, kind: str, channel_id: int = None):
     """Edit the existing container for this person if one exists, otherwise
     create it. Returns the message (new or edited) so callers can (re)map it
     in relay_map, or None on failure."""
     embed = build_thread_embed(user_id, author_name, kind)
+    view = ThreadView(user_id, kind, channel_id)
     try:
         owner = await bot.fetch_user(YOUR_USER_ID)
         existing = active_thread_message.get(user_id)
         if existing:
             try:
-                edited = await existing.edit(embed=embed)
+                edited = await existing.edit(embed=embed, view=view)
                 print("   📤 Updated existing container for this person")
                 return edited
             except (discord.NotFound, discord.HTTPException) as e:
                 print(f"   ⚠️ Couldn't edit existing container ({e}), sending a new one")
 
-        sent = await owner.send(embed=embed)
+        sent = await owner.send(embed=embed, view=view)
         active_thread_message[user_id] = sent
         print("   📤 Created new container for this person")
         return sent
@@ -158,6 +159,81 @@ intents.members = True
 intents.presences = True
 
 bot = discord.Client(intents=intents)
+
+
+class ReplyModal(discord.ui.Modal, title="Reply"):
+    """Popup input for replying through the bot. Submitting this never
+    creates a visible typed message in the DM — only the container updates."""
+
+    def __init__(self, user_id: int, kind: str, channel_id: int = None):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.kind = kind
+        self.channel_id = channel_id
+        self.message_input = discord.ui.TextInput(
+            label="Your reply",
+            style=discord.TextStyle.paragraph,
+            placeholder="Type your reply here...",
+            max_length=1900,
+            required=True,
+        )
+        self.add_item(self.message_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.message_input.value
+        try:
+            if self.kind == "mention" and self.channel_id:
+                channel = bot.get_channel(self.channel_id)
+                if channel is None:
+                    await interaction.response.send_message(
+                        "❌ Couldn't find that channel anymore.", ephemeral=True)
+                    return
+                await channel.send(f"<@{self.user_id}> {text}")
+            else:
+                target_user = await bot.fetch_user(self.user_id)
+                await target_user.send(text)
+
+            log_conversation(self.user_id, "you", text)
+
+            try:
+                name = str(await bot.fetch_user(self.user_id))
+            except Exception:
+                name = f"User {self.user_id}"
+
+            updated_embed = build_thread_embed(self.user_id, name, self.kind)
+            updated_view = ThreadView(self.user_id, self.kind, self.channel_id)
+            existing = active_thread_message.get(self.user_id)
+            if existing:
+                await existing.edit(embed=updated_embed, view=updated_view)
+
+            await interaction.response.send_message("✅ Sent", ephemeral=True, delete_after=2)
+            print(f"   ↩️  Owner reply (via button) forwarded for user {self.user_id}")
+
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ Couldn't deliver — they may have DMs closed or blocked the bot.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+
+
+class ThreadView(discord.ui.View):
+    """Attached to every container message. The Reply button opens a modal
+    so replying never leaves a separate typed message in the DM."""
+
+    def __init__(self, user_id: int, kind: str, channel_id: int = None):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.kind = kind
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="💬 Reply", style=discord.ButtonStyle.primary)
+    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != YOUR_USER_ID:
+            await interaction.response.send_message("This isn't your inbox.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ReplyModal(self.user_id, self.kind, self.channel_id))
+
+
 
 # Reply messages based on status
 REPLY_MESSAGES = {
@@ -296,7 +372,7 @@ async def on_message(message):
                             name = str(target_user)
                         except Exception:
                             name = f"User {info['user_id']}"
-                        relayed = await relay_thread_update(info["user_id"], name, "mention")
+                        relayed = await relay_thread_update(info["user_id"], name, "mention", info["channel_id"])
                         if relayed:
                             relay_map[relayed.id] = {
                                 "type": "mention",
@@ -568,7 +644,8 @@ async def on_message(message):
         # Relay to owner only — bot does NOT reply in the channel
         log_conversation(message.author.id, "them",
                           f"[in #{message.channel}] {message.content}")
-        relayed = await relay_thread_update(message.author.id, str(message.author), "mention")
+        relayed = await relay_thread_update(message.author.id, str(message.author), "mention",
+                                             message.channel.id)
         if relayed:
             relay_map[relayed.id] = {
                 "type": "mention",
@@ -631,4 +708,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Fatal error: {e}")
         sys.exit(1)
-        
