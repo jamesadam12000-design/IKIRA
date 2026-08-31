@@ -89,6 +89,59 @@ def log_conversation(user_id: int, sender: str, text: str):
     if len(history) > HISTORY_LIMIT:
         del history[0]
 
+
+# Tracks the ONE live embed message per person in the owner's DM with the
+# bot. New messages from/to that person EDIT this same message instead of
+# sending a new one, so each person stays in a single scrolling container.
+active_thread_message = {}  # user_id -> discord.Message
+
+
+def build_thread_embed(user_id: int, author_name: str, kind: str) -> discord.Embed:
+    history = conversation_history.get(user_id, [])
+    lines = []
+    for entry in history:
+        who = "**You**" if entry["from"] == "you" else f"**{author_name}**"
+        when = entry["time"].strftime("%b %d, %I:%M %p")
+        lines.append(f"{who} ({when}): {entry['text']}")
+    description = "\n\n".join(lines) if lines else "No messages yet."
+    if len(description) > 4000:
+        description = "...(earlier messages trimmed)\n\n" + description[-3900:]
+
+    embed = discord.Embed(description=description, color=get_person_color(user_id),
+                           timestamp=datetime.now())
+    icon = "📨" if kind == "dm" else "🔔"
+    embed.set_author(name=f"{icon} {author_name}")
+    embed.set_footer(text=f"ID: {user_id} • Reply here, or use !r <text> / !r {user_id} <text>")
+    return embed
+
+
+async def relay_thread_update(user_id: int, author_name: str, kind: str):
+    """Edit the existing container for this person if one exists, otherwise
+    create it. Returns the message (new or edited) so callers can (re)map it
+    in relay_map, or None on failure."""
+    embed = build_thread_embed(user_id, author_name, kind)
+    try:
+        owner = await bot.fetch_user(YOUR_USER_ID)
+        existing = active_thread_message.get(user_id)
+        if existing:
+            try:
+                edited = await existing.edit(embed=embed)
+                print("   📤 Updated existing container for this person")
+                return edited
+            except (discord.NotFound, discord.HTTPException) as e:
+                print(f"   ⚠️ Couldn't edit existing container ({e}), sending a new one")
+
+        sent = await owner.send(embed=embed)
+        active_thread_message[user_id] = sent
+        print("   📤 Created new container for this person")
+        return sent
+    except discord.Forbidden:
+        print("   ❌ Could not relay to owner (owner has DMs from the bot disabled/blocked)")
+    except Exception as e:
+        print(f"   ❌ Error relaying to owner: {e}")
+    return None
+
+
 # Create bot with all required intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -221,6 +274,9 @@ async def on_message(message):
                     target_user = await bot.fetch_user(info["user_id"])
                     await target_user.send(message.content)
                     log_conversation(info["user_id"], "you", message.content)
+                    relayed = await relay_thread_update(info["user_id"], str(target_user), "dm")
+                    if relayed:
+                        relay_map[relayed.id] = {"type": "dm", "user_id": info["user_id"]}
                     await message.add_reaction("✅")
                     print(f"   ↩️  Owner reply forwarded to {target_user} via DM")
                 elif info["type"] == "mention":
@@ -228,6 +284,18 @@ async def on_message(message):
                     if channel:
                         await channel.send(f"<@{info['user_id']}> {message.content}")
                         log_conversation(info["user_id"], "you", message.content)
+                        try:
+                            target_user = await bot.fetch_user(info["user_id"])
+                            name = str(target_user)
+                        except Exception:
+                            name = f"User {info['user_id']}"
+                        relayed = await relay_thread_update(info["user_id"], name, "mention")
+                        if relayed:
+                            relay_map[relayed.id] = {
+                                "type": "mention",
+                                "channel_id": info["channel_id"],
+                                "user_id": info["user_id"],
+                            }
                         await message.add_reaction("✅")
                         print(f"   ↩️  Owner reply forwarded to #{channel}")
                     else:
@@ -265,6 +333,9 @@ async def on_message(message):
                     target_user = await bot.fetch_user(explicit_target_id)
                     await target_user.send(reply_text)
                     log_conversation(explicit_target_id, "you", reply_text)
+                    relayed = await relay_thread_update(explicit_target_id, str(target_user), "dm")
+                    if relayed:
+                        relay_map[relayed.id] = {"type": "dm", "user_id": explicit_target_id}
                     await message.add_reaction("✅")
                     print(f"   ↩️  Owner reply forwarded to {target_user} via DM (explicit ID)")
                 except discord.NotFound:
@@ -313,6 +384,9 @@ async def on_message(message):
                 target_user = await bot.fetch_user(last_dm_sender_id)
                 await target_user.send(reply_text)
                 log_conversation(last_dm_sender_id, "you", reply_text)
+                relayed = await relay_thread_update(last_dm_sender_id, str(target_user), "dm")
+                if relayed:
+                    relay_map[relayed.id] = {"type": "dm", "user_id": last_dm_sender_id}
                 await message.add_reaction("✅")
                 print(f"   ↩️  Owner quick-reply forwarded to {target_user} via DM")
             except discord.Forbidden:
@@ -432,13 +506,7 @@ async def on_message(message):
         last_dm_sender_time = datetime.now()
         recent_dm_senders[message.author.id] = last_dm_sender_time
         log_conversation(message.author.id, "them", message.content)
-        relayed = await relay_to_owner(
-            f"{message.content}\n\n"
-            f"-# ID: `{message.author.id}` • Reply here, or use `!r <text>` / `!r {message.author.id} <text>`",
-            user_id=message.author.id,
-            author_name=str(message.author),
-            kind="dm",
-        )
+        relayed = await relay_thread_update(message.author.id, str(message.author), "dm")
         if relayed:
             relay_map[relayed.id] = {"type": "dm", "user_id": message.author.id}
 
@@ -502,14 +570,7 @@ async def on_message(message):
         # Relay to owner only — bot does NOT reply in the channel
         log_conversation(message.author.id, "them",
                           f"[in #{message.channel}] {message.content}")
-        relayed = await relay_to_owner(
-            f"{message.content}\n\n"
-            f"-# Mentioned you in **#{message.channel}** ({message.guild.name}) • "
-            f"ID: `{message.author.id}` • Reply here to respond in that channel",
-            user_id=message.author.id,
-            author_name=str(message.author),
-            kind="mention",
-        )
+        relayed = await relay_thread_update(message.author.id, str(message.author), "mention")
         if relayed:
             relay_map[relayed.id] = {
                 "type": "mention",
